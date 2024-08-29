@@ -114,6 +114,23 @@ class Block(nn.Module):
         x = x + self.mlp(self.ln_2(x))
         return x
 
+
+def inference(model, prompt, max_new_tokens=100):
+    model.eval()
+    with torch.no_grad():
+        input_ids = enc.encode(prompt)
+        input_ids = torch.tensor(input_ids, dtype=torch.long, device=device)[None, ...]
+        output = model.generate(input_ids, max_new_tokens=max_new_tokens, temperature=0.7, top_k=40)
+        return enc.decode(output[0].tolist())
+    
+def save_checkpoint(model, optimizer, filename):
+    checkpoint = {
+        'model_state_dict': model.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+    }
+    torch.save(checkpoint, filename)
+#save_checkpoint(raw_model, optimizer, f'checkpoint_epoch_{step}.pt')        
+
 # -----------------------------------------------------------------------------
 # The main GPT-2 model
 
@@ -858,3 +875,13 @@ if __name__ == "__main__":
     # clean up nice
     if ddp:
         destroy_process_group()
+
+    # 在训练结束后
+    if master_process:
+        print("Running inference to validate the model:")
+        prompt = "Once upon a time"
+        generated_text = inference(raw_model, prompt)
+        print(f"Prompt: {prompt}")
+        print(f"Generated: {generated_text}")        
+
+
