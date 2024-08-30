@@ -23,6 +23,7 @@ import struct
 import inspect
 from contextlib import nullcontext
 from dataclasses import dataclass
+import random
 
 import numpy as np
 import torch
@@ -123,6 +124,22 @@ def inference(model, prompt, max_new_tokens=100):
         output = model.generate(input_ids, max_new_tokens=max_new_tokens, temperature=0.7, top_k=40)
         return enc.decode(output[0].tolist())
     
+def load_checkpoint(model, optimizer, filename):
+    checkpoint = torch.load(filename)
+    model.load_state_dict(checkpoint['model_state_dict'])
+    optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+    return model, optimizer
+#model = GPT(config)
+#model = load_model_for_inference(model, 'path/to/your/checkpoint.pt')
+#model = model.to(device)
+#model.eval()
+
+
+def load_model_for_inference(model, filename):
+    checkpoint = torch.load(filename)
+    model.load_state_dict(checkpoint['model_state_dict'])
+    return model
+
 def save_checkpoint(model, optimizer, filename):
     checkpoint = {
         'model_state_dict': model.state_dict(),
@@ -375,6 +392,10 @@ class DistributedDataLoader:
             self.tokens = _load_data_shard(self.files[self.current_shard])
         self.current_position = self.process_rank * self.B * self.T
 
+        # 添加一个随机偏移
+        random_offset = random.randint(0, len(self.tokens) - self.B * self.T - 1)
+        self.current_position = self.process_rank * self.B * self.T + random_offset        
+
     def advance(self): # advance to next data shard
         self.current_shard = (self.current_shard + 1) % len(self.files)
         self.current_position = self.process_rank * self.B * self.T
@@ -565,8 +586,8 @@ if __name__ == "__main__":
     parser.add_argument("--model", type=str, default="gpt2", help="gpt2|gpt2-medium|gpt2-large|gpt2-xl|d12|d24|d36|d48")
     # token layout for each step of the optimization
     parser.add_argument("--batch_size", type=int, default=4, help="batch size, in units of #batch dimensions")
-    parser.add_argument("--sequence_length", type=int, default=64, help="sequence length")
-    parser.add_argument("--total_batch_size", type=int, default=256, help="total desired batch size, in units of #tokens")
+    parser.add_argument("--sequence_length", type=int, default=128, help="sequence length")
+    parser.add_argument("--total_batch_size", type=int, default=1024, help="total desired batch size, in units of #tokens")
     # workload (number of steps)
     parser.add_argument("--num_iterations", type=int, default=10, help="number of iterations to run")
     parser.add_argument("--inference_only", type=int, default=0, help="only run inference")
@@ -593,6 +614,16 @@ if __name__ == "__main__":
     # python -> C bridge
     parser.add_argument("--write_tensors", type=int, default=1, help="write tensors to disk")
     args = parser.parse_args()
+
+    #debug
+    args.sample_every=100
+    args.num_iterations=50000
+    args.model="d24"
+    args.sequence_length=512
+    args.total_batch_size=2048
+    args.input_bin="dev/data/tinyshakespeare/tiny_shakespeare_val.bin"
+    args.input_bin="dev/data/laya3.2/laya_32_train.bin"
+    #debug
 
     # args error checking and convenience variables
     B, T = args.batch_size, args.sequence_length
@@ -662,6 +693,9 @@ if __name__ == "__main__":
 
     # init (and write) the tokenizer
     enc = tiktoken.get_encoding("gpt2")
+    #aaa = enc.encode("you know Caius Marcius")
+    aaa = enc.encode("蜻蜓")
+    bbb = enc.decode(aaa)
     if master_process and args.write_tensors: # tokenizer is technically not tensors but ok
         write_tokenizer(enc, "gpt2_tokenizer.bin")
 
@@ -790,11 +824,11 @@ if __name__ == "__main__":
             # we'll kick off the generation with "<|endoftext|>", which designates the start of a new sequence
             start_ids = [enc.eot_token]
             xg = (torch.tensor(start_ids, dtype=torch.long, device=device)[None, ...])
-            max_new_tokens = 32
+            max_new_tokens = 300
             temperature = 1.0
             top_k = 40
             yg = raw_model.generate(xg, max_new_tokens, temperature=temperature, top_k=top_k)
-            print0('---------------')
+            print0('\n\n---------------')
             print0(enc.decode(yg[0].tolist()))
             print0('---------------')
 
@@ -879,9 +913,10 @@ if __name__ == "__main__":
     # 在训练结束后
     if master_process:
         print("Running inference to validate the model:")
-        prompt = "Once upon a time"
+        prompt = "Their noise"
         generated_text = inference(raw_model, prompt)
         print(f"Prompt: {prompt}")
         print(f"Generated: {generated_text}")        
+        save_checkpoint(raw_model,optimizer,'laya_1024.pt')
 
 
