@@ -183,24 +183,19 @@ class GPT(nn.Module):
         pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
         x = tok_emb + pos_emb
 
-        for block in self.transformer.h:
+        for i,block in  enumerate(self.transformer.h):
+            #if i<=2 or i>=24:
+            #    x = block(x)
             x = block(x)
         x = self.transformer.ln_f(x)
 
-        if targets is not None:
-            # if we are given some desired targets also calculate the loss
-            logits = self.lm_head(x)
-            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
-        else:
-            # inference-time mini-optimization: only forward the lm_head on the very last position
-            logits = self.lm_head(x[:, [-1], :]) # note: using list [-1] to preserve the time dim
-            loss = None
+        logits = self.lm_head(x[:, [-1], :]) # note: using list [-1] to preserve the time dim
 
         # there are performance reasons why not returning logits is prudent, if not needed
         if not return_logits:
             logits = None
 
-        return logits, loss
+        return logits
 
     def configure_optimizers(self, weight_decay, learning_rate, betas, device_type, zero_stage):
         # start with all of the candidate parameters
@@ -244,7 +239,7 @@ class GPT(nn.Module):
             # if the sequence context is growing too long we must crop it at block_size
             idx_cond = idx if idx.size(1) <= self.config.block_size else idx[:, -self.config.block_size:]
             # forward the model to get the logits for the index in the sequence
-            logits, _ = self(idx_cond)
+            logits = self(idx_cond)
             # pluck the logits at the final step and scale by desired temperature
             logits = logits[:, -1, :] / temperature
             # optionally crop the logits to only the top k options
@@ -389,9 +384,9 @@ if __name__ == "__main__":
     ctx = torch.amp.autocast(device_type=device_type, dtype=ptdtype) if device_type == "cuda" else nullcontext()
 
     # rng / reproducibility
-    torch.manual_seed(42)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed(42)
+    #torch.manual_seed(42)
+    #if torch.cuda.is_available():
+    #    torch.cuda.manual_seed(42)
 
     # set the torch precision mode to use TensorFloat32 (TF32) for matmuls
     # docs https://pytorch.org/docs/stable/generated/torch.set_float32_matmul_precision.html
@@ -419,7 +414,7 @@ if __name__ == "__main__":
         }[args.model]
         model = GPT(model_config)
 
-    model = load_model_for_inference(model, 'laya.pt')
+    model = load_model_for_inference(model, 'laya_1024.pt')
     model.to(device)
     model.eval()
 
@@ -428,10 +423,10 @@ if __name__ == "__main__":
     if ddp:
         model = DDP(model, device_ids=[ddp_local_rank])
     raw_model = model.module if ddp else model # always contains the "raw" unwrapped model
-    prompt = "llll"
-    generated_text = inference(raw_model, prompt)
-    print(f"Prompt: {prompt}")
-    print(f"Generated: {generated_text}")        
+    prompt = "static addAtlas(atlasUrl: string, prefix: string, frames: Array<string>) {"
+    for i in range(10):
+        generated_text = inference(raw_model, prompt,512)
+        print(f"Generated: {generated_text}\n\n\n\n")        
 
   
     if ddp:

@@ -24,6 +24,7 @@ import inspect
 from contextlib import nullcontext
 from dataclasses import dataclass
 import random
+import wandb
 
 import numpy as np
 import torch
@@ -617,10 +618,10 @@ if __name__ == "__main__":
 
     #debug
     args.sample_every=100
-    args.num_iterations=50000
+    args.num_iterations=100
     args.model="d24"
     args.sequence_length=512
-    args.total_batch_size=2048
+    args.total_batch_size=4096
     args.input_bin="dev/data/tinyshakespeare/tiny_shakespeare_val.bin"
     args.input_bin="dev/data/laya3.2/laya_32_train.bin"
     #debug
@@ -787,6 +788,8 @@ if __name__ == "__main__":
         with open(logfile, "w") as f:
             pass
 
+    wandb.init(project=f"gpt2_laya")        
+
     if device == "cuda":
         torch.cuda.reset_peak_memory_stats()
     timings = []
@@ -891,6 +894,7 @@ if __name__ == "__main__":
         # the 0th iteration is often an outlier (much slower) => skip logging it
         tokens_per_second = grad_accum_steps * ddp_world_size * B * T / (t1-t0)
         print0(f"step {step+1:4d}/{args.num_iterations} | train loss {lossf:.6f} | norm {norm:.4f} | lr {lr:.2e} | ({(t1-t0)*1000:.2f} ms | {tokens_per_second:.0f} tok/s)")
+        wandb.log({"loss": lossf})
         # log to logile
         if master_process and logfile is not None:
             with open(logfile, "a") as f:
@@ -917,6 +921,6 @@ if __name__ == "__main__":
         generated_text = inference(raw_model, prompt)
         print(f"Prompt: {prompt}")
         print(f"Generated: {generated_text}")        
-        save_checkpoint(raw_model,optimizer,'laya_1024.pt')
+        save_checkpoint(raw_model,optimizer,f'laya_1024_{args.num_iterations}.pt')
 
 
