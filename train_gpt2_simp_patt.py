@@ -267,7 +267,7 @@ class GPT(nn.Module):
         return idx
 
 class SimpData:
-    def __init__(self,B, T, process_rank, num_processes):
+    def __init__(self,B, T):
         self.B = B
         self.T = T
         self.reset()
@@ -295,27 +295,6 @@ class SimpData:
         y = (buf[1:]).view(B, T) # targets
         return x, y
 
-
-@torch.no_grad()
-def pad_vocab(tensor, multiple=128, value=0):
-    """
-    The dimension of the vocab size in GPT-2 is 50,257
-    which is unfortunately a very unfriendly number for a lot of
-    matrix operations on the GPU. So we pad it to the nearest
-    friendlier multiple, e.g. 50,304 if multiple=128 when we
-    export the weights into C land. This is a NOOP algorithmically
-    and is only done to make the tensor operations more efficient.
-    """
-    assert tensor.ndim == 2
-    V, C = tensor.shape
-    assert V == 50257, "just being defensive here"
-    # calculate padded vocab size by rounding up to nearest multiple
-    Vp = ((V + multiple - 1) // multiple) * multiple
-    # pad the tensor
-    pad_rows = Vp - V
-    padded = tensor if pad_rows == 0 else F.pad(tensor, (0, 0, 0, pad_rows), value=value)
-    assert padded.shape == (Vp, C)
-    return padded
 
 
 # -----------------------------------------------------------------------------
@@ -369,10 +348,11 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     #debug
-    args.sample_every=100
-    args.num_iterations=100
+    #args.sample_every=100
+    #args.num_iterations=3
     args.sequence_length=64
-    args.total_batch_size=4096*4
+    #模拟每批次大小，影响梯度累加次数。如果为B*T则没有梯度累加
+    args.total_batch_size=args.batch_size*args.sequence_length*10
     #args.inference_only = True
     #debug
 
@@ -383,10 +363,8 @@ if __name__ == "__main__":
 
     # set up DDP (distributed data parallel). torchrun sets this env variable
 
-    ddp_rank = 0
     ddp_local_rank = 0
     zero_stage = 0
-    ddp_world_size = 1
     master_process = True
     seed_offset = 0
     # select the device
@@ -404,7 +382,7 @@ if __name__ == "__main__":
     device_type = 'cuda' if 'cuda' in device else 'cpu'
 
     # calculate gradient accumulation from the desired total batch size and the current run configuration
-    tokens_per_fwdbwd = B * T * ddp_world_size
+    tokens_per_fwdbwd = B * T
     assert args.total_batch_size % tokens_per_fwdbwd == 0
     grad_accum_steps = args.total_batch_size // tokens_per_fwdbwd
     print0(f"total desired batch size: {args.total_batch_size}")
@@ -429,7 +407,7 @@ if __name__ == "__main__":
     FLASH = args.flash
 
     # init the model, either from scratch or from OpenAI pretrained checkpoint
-    model_config =GPTConfig(block_size=512, vocab_size=50257, n_layer=2, n_head=1, n_embd=32)
+    model_config =GPTConfig(block_size=64, vocab_size=32, n_layer=1, n_head=1, n_embd=256)
     model = GPT(model_config)
     model.to(device)
 
@@ -437,7 +415,7 @@ if __name__ == "__main__":
         model = load_model_for_inference(model, 'simp.pt')
         model.eval()
         with torch.no_grad():
-            input_ids = [1110]
+            input_ids = [0]
             input_ids = torch.tensor(input_ids, dtype=torch.long, device=device)[None, ...]
             output = model.generate(input_ids, max_new_tokens=T, temperature=0.7, top_k=40)
             print(output[0].tolist())
@@ -452,7 +430,7 @@ if __name__ == "__main__":
         model = torch.compile(model)
 
     #test
-    train_loader = SimpData( B, T, ddp_rank, ddp_world_size)
+    train_loader = SimpData( B, T)
 
     # main training loop
 
@@ -565,7 +543,7 @@ if __name__ == "__main__":
         # time and print
         t1 = time.time()
         # the 0th iteration is often an outlier (much slower) => skip logging it
-        tokens_per_second = grad_accum_steps * ddp_world_size * B * T / (t1-t0)
+        tokens_per_second = grad_accum_steps * B * T / (t1-t0)
         print0(f"step {step+1:4d}/{args.num_iterations} | train loss {lossf:.6f} | norm {norm:.4f} | lr {lr:.2e} | ({(t1-t0)*1000:.2f} ms | {tokens_per_second:.0f} tok/s)")
         #wandb.log({"loss": lossf})
         # log to logile
@@ -585,7 +563,7 @@ if __name__ == "__main__":
     # 在训练结束后
     if master_process:
         print("Running inference to validate the model:")
-        prompt = [0]
+        prompt = [10]
         generated_text = inference(raw_model, prompt)
         print(f"Prompt: {prompt}")
         print(f"Generated: {generated_text}")        
