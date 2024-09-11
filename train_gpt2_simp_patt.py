@@ -120,12 +120,11 @@ class Block(nn.Module):
 def inference(model, prompt, max_new_tokens=100):
     model.eval()
     with torch.no_grad():
-        input_ids = enc.encode(prompt)
+        input_ids = prompt
         input_ids = torch.tensor(input_ids, dtype=torch.long, device=device)[None, ...]
         output = model.generate(input_ids, max_new_tokens=max_new_tokens, temperature=0.7, top_k=40)
-        print('token:')
         print(output[0].tolist())
-        return enc.decode(output[0].tolist())
+        return output[0].tolist()
     
 def load_checkpoint(model, optimizer, filename):
     checkpoint = torch.load(filename)
@@ -496,10 +495,10 @@ if __name__ == "__main__":
 
     #debug
     args.sample_every=100
-    args.num_iterations=1600
+    args.num_iterations=100
     args.sequence_length=64
     args.total_batch_size=4096*4
-    args.inference_only = True
+    #args.inference_only = True
     #debug
 
     # args error checking and convenience variables
@@ -567,12 +566,6 @@ if __name__ == "__main__":
     assert args.flash in {0, 1}
     FLASH = args.flash
 
-    # init (and write) the tokenizer
-    enc = tiktoken.get_encoding("gpt2")
-    #aaa = enc.encode("you know Caius Marcius")
-    aaa = enc.encode("蜻蜓")
-    bbb = enc.decode(aaa)
-
     # init the model, either from scratch or from OpenAI pretrained checkpoint
     model_config =GPTConfig(block_size=512, vocab_size=50257, n_layer=2, n_head=1, n_embd=32)
     model = GPT(model_config)
@@ -635,7 +628,7 @@ if __name__ == "__main__":
         with open(logfile, "w") as f:
             pass
 
-    wandb.init(project=f"gpt2_laya")        
+    #wandb.init(project=f"gpt2_laya")        
 
     if device == "cuda":
         torch.cuda.reset_peak_memory_stats()
@@ -653,15 +646,13 @@ if __name__ == "__main__":
             model.eval()
             # before we end, let's also do one round of inference
             # we'll kick off the generation with "<|endoftext|>", which designates the start of a new sequence
-            start_ids = [enc.eot_token]
+            start_ids = [0]
             xg = (torch.tensor(start_ids, dtype=torch.long, device=device)[None, ...])
             max_new_tokens = 300
             temperature = 1.0
             top_k = 40
             yg = raw_model.generate(xg, max_new_tokens, temperature=temperature, top_k=top_k)
-            print0('\n\n---------------')
-            print0(enc.decode(yg[0].tolist()))
-            print0('---------------')
+            print0(yg[0].tolist())
 
         # bit confusing: we want to make sure to eval and sample on 0th iteration
         # but also after the very last iteration. so we loop for step <= num_iterations
@@ -722,7 +713,7 @@ if __name__ == "__main__":
         # the 0th iteration is often an outlier (much slower) => skip logging it
         tokens_per_second = grad_accum_steps * ddp_world_size * B * T / (t1-t0)
         print0(f"step {step+1:4d}/{args.num_iterations} | train loss {lossf:.6f} | norm {norm:.4f} | lr {lr:.2e} | ({(t1-t0)*1000:.2f} ms | {tokens_per_second:.0f} tok/s)")
-        wandb.log({"loss": lossf})
+        #wandb.log({"loss": lossf})
         # log to logile
         if master_process and logfile is not None:
             with open(logfile, "a") as f:
@@ -745,7 +736,7 @@ if __name__ == "__main__":
     # 在训练结束后
     if master_process:
         print("Running inference to validate the model:")
-        prompt = "Their noise"
+        prompt = [0]
         generated_text = inference(raw_model, prompt)
         print(f"Prompt: {prompt}")
         print(f"Generated: {generated_text}")        
