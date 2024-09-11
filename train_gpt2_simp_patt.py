@@ -1,20 +1,3 @@
-"""
-Reference code for GPT-2 training and inference.
-Will save the model weights into files, to be read from C as initialization.
-
-References:
-1) the official GPT-2 TensorFlow implementation released by OpenAI:
-https://github.com/openai/gpt-2/blob/master/src/model.py
-2) huggingface/transformers PyTorch implementation:
-https://github.com/huggingface/transformers/blob/main/src/transformers/models/gpt2/modeling_gpt2.py
-
-Example launches to only benchmark the speed of bfloat16 compiled GPU training:
-1 GPU:
-python train_gpt2.py --write_tensors=0 --num_iterations=50 --sequence_length=1024 --compile=1 --tensorcores=1 --dtype=bfloat16
-you can also turn on flash-attention by appending --flash=1
-4 GPU:
-torchrun --standalone --nproc_per_node=4 train_gpt2.py --write_tensors=0 --num_iterations=50 --sequence_length=1024 --compile=1 --tensorcores=1 --dtype=bfloat16
-"""
 
 import os
 import math
@@ -312,53 +295,6 @@ class SimpData:
         y = (buf[1:]).view(B, T) # targets
         return x, y
 
-# -----------------------------------------------------------------------------
-# Python -> C bridge utilities for saving params/grads/activations to .bin files
-
-def write_fp32(tensor, file):
-    t = tensor.detach().cpu().to(torch.float32)
-    b = t.numpy().tobytes()
-    file.write(b)
-
-def write_bf16(tensor, file):
-    t = tensor.detach().cpu().to(torch.bfloat16)
-    # numpy doesn't have bf16 datatype so we have to trick it
-    t = t.view(torch.int16) # trick: reinterpret as int16
-    b = t.numpy().tobytes()
-    file.write(b)
-
-def write_tensors(model_tensors, L, file, dtype):
-    # writes the GPT-2 model's weights to a binary file
-    assert dtype in {"float32", "bfloat16"}
-    write_fun = write_fp32 if dtype == "float32" else write_bf16
-    write_fun(model_tensors["transformer.wte.weight"], file) # (V, C)
-    write_fun(model_tensors["transformer.wpe.weight"], file) # (T, C)
-    for i in range(L): # (L, C)
-        write_fun(model_tensors[f"transformer.h.{i}.ln_1.weight"], file)
-    for i in range(L): # (L, C)
-        write_fun(model_tensors[f"transformer.h.{i}.ln_1.bias"], file)
-    for i in range(L): # (L, 3C, C)
-        write_fun(model_tensors[f"transformer.h.{i}.attn.c_attn.weight"], file)
-    for i in range(L): # (L, 3C)
-        write_fun(model_tensors[f"transformer.h.{i}.attn.c_attn.bias"], file)
-    for i in range(L): # (L, C, C)
-        write_fun(model_tensors[f"transformer.h.{i}.attn.c_proj.weight"], file)
-    for i in range(L): # (L, C)
-        write_fun(model_tensors[f"transformer.h.{i}.attn.c_proj.bias"], file)
-    for i in range(L): # (L, C)
-        write_fun(model_tensors[f"transformer.h.{i}.ln_2.weight"], file)
-    for i in range(L): # (L, C)
-        write_fun(model_tensors[f"transformer.h.{i}.ln_2.bias"], file)
-    for i in range(L): # (L, 4C, C)
-        write_fun(model_tensors[f"transformer.h.{i}.mlp.c_fc.weight"], file)
-    for i in range(L): # (L, 4C)
-        write_fun(model_tensors[f"transformer.h.{i}.mlp.c_fc.bias"], file)
-    for i in range(L): # (L, C, 4C)
-        write_fun(model_tensors[f"transformer.h.{i}.mlp.c_proj.weight"], file)
-    for i in range(L): # (L, C)
-        write_fun(model_tensors[f"transformer.h.{i}.mlp.c_proj.bias"], file)
-    write_fun(model_tensors["transformer.ln_f.weight"], file) # (C, )
-    write_fun(model_tensors["transformer.ln_f.bias"], file) # (C, )
 
 @torch.no_grad()
 def pad_vocab(tensor, multiple=128, value=0):
@@ -380,66 +316,6 @@ def pad_vocab(tensor, multiple=128, value=0):
     padded = tensor if pad_rows == 0 else F.pad(tensor, (0, 0, 0, pad_rows), value=value)
     assert padded.shape == (Vp, C)
     return padded
-
-def write_model(model, filename, dtype):
-    # everything we need to instantiate the model
-    # 1) header is: version int, GPTConfig ints, padding to 1024 bytes
-    assert dtype in {"float32", "bfloat16"} # float16 todo maybe later
-    version = {
-        "float32": 3, # 3: all tensors are fp32, padded vocab
-        "bfloat16": 5, # 5: all tensors are bf16, padded vocab
-    }[dtype]
-    header = torch.zeros(256, dtype=torch.int32)
-    header[0] = 20240326 # magic
-    header[1] = version # checkpoint version
-    header[2] = model.config.block_size
-    header[3] = model.config.vocab_size
-    header[4] = model.config.n_layer
-    header[5] = model.config.n_head
-    header[6] = model.config.n_embd
-    # 2) the parameters follow the header
-    params = {name: param.cpu() for name, param in model.named_parameters()}
-    # pad the vocab to a multiple of 128 here at export, for efficiency in C
-    wte = params["transformer.wte.weight"] # (V, C)
-    wte_padded = pad_vocab(wte) # (Vp, C)
-    params["transformer.wte.weight"] = wte_padded # (Vp, C)
-    print(f"padded vocab size from {wte.size(0)} to {wte_padded.size(0)}")
-    header[7] = wte_padded.size(0) # padded vocab size store in header
-    # now write to file
-    with open(filename, "wb") as file:
-        file.write(header.numpy().tobytes()) # header
-        write_tensors(params, model.config.n_layer, file, dtype) # params
-    print(f"wrote {filename}")
-
-def write_state(model, x, y, logits, loss, filename):
-    # the state is used for debugging.
-    # it contains information about the input, logits, loss, and the parameter gradients
-    # this can be used for checking the computation correctness in C
-    header = torch.zeros(256, dtype=torch.int32)
-    header[0] = 20240327 # magic
-    header[1] = 2 # run state version = 2 (1 -> 2 for padded vocab changes)
-    header[2] = x.size(0) # batch size of the batch, B
-    header[3] = x.size(1) # temporal extent of the batch, T
-    grads = {name: param.grad.cpu() for name, param in model.named_parameters()}
-    # pad the vocab grads here as well, to mirror write_model
-    wte_grad = grads["transformer.wte.weight"] # (V, C)
-    wte_grad_padded = pad_vocab(wte_grad, value=0) # (Vp, C) # TODO later maybe pad with nan?
-    grads["transformer.wte.weight"] = wte_grad_padded # (Vp, C)
-    print(f"padded vocab size in reference grads from {wte_grad.size(0)} to {wte_grad_padded.size(0)}")
-    with open(filename, "wb") as file:
-        # header
-        file.write(header.numpy().tobytes())
-        # input x
-        file.write(x.cpu().numpy().astype("int32").tobytes()) # (B, T)
-        # targets y
-        file.write(y.cpu().numpy().astype("int32").tobytes()) # (B, T)
-        # logits (result of the model forward pass)
-        write_fp32(logits.cpu(), file)
-        # loss (single float, result of the cross entropy loss)
-        write_fp32(loss.cpu(), file)
-        # gradients
-        write_tensors(grads, model.config.n_layer, file, "float32")
-    print(f"wrote {filename}")
 
 
 # -----------------------------------------------------------------------------
@@ -490,7 +366,6 @@ if __name__ == "__main__":
     parser.add_argument("--dtype", type=str, default="float32", help="float32|float16|bfloat16")
     parser.add_argument("--zero_stage", type=int, default=0, help="zero redundancy optimizer stage (0/1/2/3)")
     # python -> C bridge
-    parser.add_argument("--write_tensors", type=int, default=1, help="write tensors to disk")
     args = parser.parse_args()
 
     #debug
@@ -507,37 +382,24 @@ if __name__ == "__main__":
     assert args.dtype in {"float32", "float16", "bfloat16"}
 
     # set up DDP (distributed data parallel). torchrun sets this env variable
-    ddp = int(os.environ.get('RANK', -1)) != -1 # is this a ddp run?
-    if ddp:
-        # use of DDP atm demands CUDA, we set the device appropriately according to rank
-        assert torch.cuda.is_available(), "for now i think we need CUDA for DDP"
-        init_process_group(backend='nccl')
-        ddp_rank = int(os.environ['RANK'])
-        ddp_local_rank = int(os.environ['LOCAL_RANK'])
-        ddp_world_size = int(os.environ['WORLD_SIZE'])
-        device = f'cuda:{ddp_local_rank}'
-        torch.cuda.set_device(device)
-        master_process = ddp_rank == 0 # this process will do logging, checkpointing etc.
-        seed_offset = 0 # each process gets the exact same seed
-        zero_stage = args.zero_stage
+
+    ddp_rank = 0
+    ddp_local_rank = 0
+    zero_stage = 0
+    ddp_world_size = 1
+    master_process = True
+    seed_offset = 0
+    # select the device
+    if args.device:
+        # provided explicitly by the user
+        device = args.device
     else:
-        ddp_rank = 0
-        ddp_local_rank = 0
-        zero_stage = 0
-        ddp_world_size = 1
-        master_process = True
-        seed_offset = 0
-        # select the device
-        if args.device:
-            # provided explicitly by the user
-            device = args.device
-        else:
-            # attempt to autodetect the device
-            device = "cpu"
-            if torch.cuda.is_available():
-                device = "cuda"
-            elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-                device = "mps"
+        # attempt to autodetect the device
+        device = "cpu"
+        if torch.cuda.is_available():
+            device = "cuda"
+        elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+            device = "mps"
     print(f"using device: {device}")
     device_type = 'cuda' if 'cuda' in device else 'cpu'
 
@@ -595,9 +457,7 @@ if __name__ == "__main__":
     # main training loop
 
     # here we wrap model into DDP container
-    if ddp:
-        model = DDP(model, device_ids=[ddp_local_rank])
-    raw_model = model.module if ddp else model # always contains the "raw" unwrapped model
+    raw_model = model # always contains the "raw" unwrapped model
 
     # init the optimizer
     optimizer = raw_model.configure_optimizers(weight_decay=args.weight_decay,
@@ -673,11 +533,7 @@ if __name__ == "__main__":
             # fetch a batch
             x, y = train_loader.next_batch()
             x, y = x.to(device), y.to(device)
-            if ddp:
-                # we want only the last micro-step to sync grads in a DDP model
-                # the official way to do this is with model.no_sync(), but that is a
-                # context manager that bloats the code, so we just toggle this variable
-                model.require_backward_grad_sync = (micro_step == grad_accum_steps - 1)
+
             # forward pass
             with ctx:
                 _, loss = model(x, y, return_logits=False)
@@ -690,8 +546,6 @@ if __name__ == "__main__":
             # backward pass
             if not args.inference_only:
                 loss.backward()
-        if ddp:
-            dist.all_reduce(lossf, op=dist.ReduceOp.AVG)
         lossf = lossf.item()
         norm = torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
         # determine and set the learning rate for this iteration
@@ -727,11 +581,6 @@ if __name__ == "__main__":
     timings = timings[-20:]
     print0(f"final {len(timings)} iters avg: {np.mean(timings)*1000:.3f}ms")
     print0(f"peak memory consumption: {torch.cuda.max_memory_allocated() // 1024 // 1024} MiB")
-
-    # -------------------------------------------------------------------------
-    # clean up nice
-    if ddp:
-        destroy_process_group()
 
     # 在训练结束后
     if master_process:
