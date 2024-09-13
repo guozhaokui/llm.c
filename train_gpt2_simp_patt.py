@@ -18,6 +18,9 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group
 from torch.distributed.optim import ZeroRedundancyOptimizer
 import torch.distributed as dist
+from torch.utils.tensorboard import SummaryWriter
+
+writer = SummaryWriter()
 
 # -----------------------------------------------------------------------------
 # PyTorch nn.Module definitions for the GPT-2 model
@@ -106,7 +109,6 @@ def inference(model, prompt, max_new_tokens=100):
         input_ids = prompt
         input_ids = torch.tensor(input_ids, dtype=torch.long, device=device)[None, ...]
         output = model.generate(input_ids, max_new_tokens=max_new_tokens, temperature=0.7, top_k=40)
-        print(output[0].tolist())
         return output[0].tolist()
     
 def load_checkpoint(model, optimizer, filename):
@@ -261,6 +263,9 @@ class GPT(nn.Module):
             probs = F.softmax(logits, dim=-1)
             # sample from the distribution
             idx_next = torch.multinomial(probs, num_samples=1)
+            if idx_next.item()==22:
+                break
+            
             # append sampled index to the running sequence and continue
             idx = torch.cat((idx, idx_next), dim=1)
 
@@ -271,6 +276,40 @@ class SimpData:
         self.B = B
         self.T = T
         self.reset()
+        self.datas=[]
+        self.create()
+
+    def create(self):
+        """
+		a is b
+		b has c
+		b有10种  0~9
+		c有10种  10~19
+		a有100种 100~199
+		is 20
+		has 21
+		end 22
+        
+        """
+        arra = list(range(100, 200))
+        arrb = list(range(10))
+        arrc = list(range(10,20))
+
+        # 将第一个数组随机且均匀地链接到第二个数组
+        random.shuffle(arra)  # 随机打乱第一个数组
+        random.shuffle(arrb)
+        random.shuffle(arrc)
+
+        # a is b
+        for i, a in enumerate(arra):
+            self.datas.append([a,20,arrb[i%len(arrb)],22])
+
+        # b has c
+        for i, b in enumerate(arrb):
+            self.datas.append([b,21,arrc[i%len(arrc)],22])
+
+        print(self.datas)
+        pass
 
     def reset(self):
         pass
@@ -278,7 +317,7 @@ class SimpData:
     def advance(self): # advance to next data shard
         pass
 
-    def next_batch(self):
+    def next_batch1(self):
         # buf = torch.rand(B,T)
         # buf = 10+10*buf
         # x = torch.zeros((self.B, self.T), dtype=torch.long)
@@ -288,13 +327,29 @@ class SimpData:
         # T = self.T
         # buf = torch.rand() self.tokens[self.current_position : self.current_position+B*T+1]
         # buf = torch.tensor(buf.astype(np.int32), dtype=torch.long)
-        buf = torch.randint(10,11,(B*T+1,))
+        # 两种简单的重复模式
+        if random.randint(0,11)<5:
+            buf = torch.randint(10,11,(B*T+1,))
+        else:
+            buf = torch.randint(11,12,(B*T+1,))
         #st = random.randint(0,10000)
         #buf = torch.tensor([st+i for i in range(B*T+1)])
         x = (buf[:-1]).view(B, T) # inputs
         y = (buf[1:]).view(B, T) # targets
         return x, y
+    
+    def next_batch(self):
+        buf = torch.randint(10,11,(B*T+1,))
+        x = (buf[:-1]).view(B, T) # inputs
+        y = (buf[1:]).view(B, T) # targets
 
+        for i in range(self.B):
+            data = random.choice(self.datas)  # 随机选择一个数据
+            length = min(len(data), self.T)  # 取 data 长度和 T 中的较小值
+            x[i, :length] = torch.tensor(data[:length])  # 填充数据
+            x[i, length:] = 22  # 剩余部分填充 22        
+
+        return x, y
 
 
 # -----------------------------------------------------------------------------
@@ -349,11 +404,11 @@ if __name__ == "__main__":
 
     #debug
     #args.sample_every=100
-    #args.num_iterations=3
-    args.sequence_length=64
+    args.num_iterations=900
+    args.sequence_length=16
     #模拟每批次大小，影响梯度累加次数。如果为B*T则没有梯度累加
     args.total_batch_size=args.batch_size*args.sequence_length*10
-    #args.inference_only = True
+    args.inference_only = True
     #debug
 
     # args error checking and convenience variables
@@ -407,7 +462,7 @@ if __name__ == "__main__":
     FLASH = args.flash
 
     # init the model, either from scratch or from OpenAI pretrained checkpoint
-    model_config =GPTConfig(block_size=64, vocab_size=32, n_layer=1, n_head=1, n_embd=256)
+    model_config =GPTConfig(block_size=16, vocab_size=256, n_layer=1, n_head=1, n_embd=256)
     model = GPT(model_config)
     model.to(device)
 
@@ -415,10 +470,22 @@ if __name__ == "__main__":
         model = load_model_for_inference(model, 'simp.pt')
         model.eval()
         with torch.no_grad():
-            input_ids = [0]
+            #emb
+            embs=torch.Tensor().to(device)
+            alllabel=[]
+            for nn in range(0,200):
+                input_ids=[nn]
+                input_ids = torch.tensor(input_ids, dtype=torch.long, device=device)[None, ...]
+                emb = model.transformer.wte(input_ids)[0]
+                embs=torch.cat((embs,emb),dim=0)#合并
+                alllabel.append(nn)
+            writer.add_embedding(embs,alllabel,global_step=0)
+
+            input_ids = [108]
             input_ids = torch.tensor(input_ids, dtype=torch.long, device=device)[None, ...]
             output = model.generate(input_ids, max_new_tokens=T, temperature=0.7, top_k=40)
             print(output[0].tolist())
+        writer.close()    
         exit(0)
 
 
@@ -545,6 +612,12 @@ if __name__ == "__main__":
         # the 0th iteration is often an outlier (much slower) => skip logging it
         tokens_per_second = grad_accum_steps * B * T / (t1-t0)
         print0(f"step {step+1:4d}/{args.num_iterations} | train loss {lossf:.6f} | norm {norm:.4f} | lr {lr:.2e} | ({(t1-t0)*1000:.2f} ms | {tokens_per_second:.0f} tok/s)")
+        writer.add_scalars('loss/train',{
+            "train":lossf
+            #'valacc':total_acc_val / len(val_data)
+            },
+            step)
+
         #wandb.log({"loss": lossf})
         # log to logile
         if master_process and logfile is not None:
@@ -563,10 +636,13 @@ if __name__ == "__main__":
     # 在训练结束后
     if master_process:
         print("Running inference to validate the model:")
-        prompt = [10]
-        generated_text = inference(raw_model, prompt)
-        print(f"Prompt: {prompt}")
+        generated_text = inference(raw_model, [100])
+        print(f"Generated: {generated_text}")        
+        generated_text = inference(raw_model, [101])
+        print(f"Generated: {generated_text}")        
+        generated_text = inference(raw_model, [102])
         print(f"Generated: {generated_text}")        
         save_checkpoint(raw_model,optimizer,f'simp.pt')
 
 
+writer.close()    
