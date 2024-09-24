@@ -33,6 +33,9 @@ class NewGELU(nn.Module):
 # using a global to toggle flash-attention
 FLASH = 0
 
+EOT=0
+IS=1
+HAS=2
 class CausalSelfAttention(nn.Module):
 
     def __init__(self, config):
@@ -263,7 +266,7 @@ class GPT(nn.Module):
             probs = F.softmax(logits, dim=-1)
             # sample from the distribution
             idx_next = torch.multinomial(probs, num_samples=1)
-            if idx_next.item()==22:
+            if idx_next.item()==EOT:
                 break
             
             # append sampled index to the running sequence and continue
@@ -286,13 +289,13 @@ class SimpData:
 		b有10种  0~9
 		c有10种  10~19
 		a有100种 100~199
-		is 20
-		has 21
-		end 22
+		is 1
+		has 2
+		end 0
         
         """
-        arra = list(range(100, 200))
-        arrb = list(range(10))
+        arra = list(range(20, 200))
+        arrb = list(range(3,10))
         arrc = list(range(10,20))
 
         # 将第一个数组随机且均匀地链接到第二个数组
@@ -301,12 +304,24 @@ class SimpData:
         random.shuffle(arrc)
 
         # a is b
+        ab={}
         for i, a in enumerate(arra):
-            self.datas.append([a,20,arrb[i%len(arrb)],22])
+            cc = arrb[i%len(arrb)]
+            self.datas.append([a,IS,cc,0])
+            ab[a]=cc
 
         # b has c
+        bc={}
         for i, b in enumerate(arrb):
-            self.datas.append([b,21,arrc[i%len(arrc)],22])
+            cc = arrc[i%len(arrc)]
+            self.datas.append([b,HAS,cc,0])
+            bc[b]=cc
+
+        # a has c
+        for i, a in enumerate(arra):
+            if not a==130:
+                cc = bc[ab[a]]
+                self.datas.append([a,HAS,cc,0])
 
         print(self.datas)
         pass
@@ -347,7 +362,7 @@ class SimpData:
             data = random.choice(self.datas)  # 随机选择一个数据
             length = min(len(data), self.T)  # 取 data 长度和 T 中的较小值
             x[i, :length] = torch.tensor(data[:length])  # 填充数据
-            x[i, length:] = 22  # 剩余部分填充 22        
+            x[i, length:] = EOT  # 剩余部分填充 22        
 
         return x, y
 
@@ -404,7 +419,7 @@ if __name__ == "__main__":
 
     #debug
     #args.sample_every=100
-    args.num_iterations=900
+    args.num_iterations=10000
     args.sequence_length=16
     #模拟每批次大小，影响梯度累加次数。如果为B*T则没有梯度累加
     args.total_batch_size=args.batch_size*args.sequence_length*10
@@ -462,7 +477,7 @@ if __name__ == "__main__":
     FLASH = args.flash
 
     # init the model, either from scratch or from OpenAI pretrained checkpoint
-    model_config =GPTConfig(block_size=16, vocab_size=256, n_layer=1, n_head=1, n_embd=256)
+    model_config =GPTConfig(block_size=16, vocab_size=256, n_layer=1, n_head=1, n_embd=32)
     model = GPT(model_config)
     model.to(device)
 
@@ -473,7 +488,7 @@ if __name__ == "__main__":
             #emb
             embs=torch.Tensor().to(device)
             alllabel=[]
-            for nn in range(0,200):
+            for nn in range(100,200):
                 input_ids=[nn]
                 input_ids = torch.tensor(input_ids, dtype=torch.long, device=device)[None, ...]
                 emb = model.transformer.wte(input_ids)[0]
@@ -481,7 +496,7 @@ if __name__ == "__main__":
                 alllabel.append(nn)
             writer.add_embedding(embs,alllabel,global_step=0)
 
-            input_ids = [108]
+            input_ids = [130,2]
             input_ids = torch.tensor(input_ids, dtype=torch.long, device=device)[None, ...]
             output = model.generate(input_ids, max_new_tokens=T, temperature=0.7, top_k=40)
             print(output[0].tolist())
@@ -611,7 +626,7 @@ if __name__ == "__main__":
         t1 = time.time()
         # the 0th iteration is often an outlier (much slower) => skip logging it
         tokens_per_second = grad_accum_steps * B * T / (t1-t0)
-        print0(f"step {step+1:4d}/{args.num_iterations} | train loss {lossf:.6f} | norm {norm:.4f} | lr {lr:.2e} | ({(t1-t0)*1000:.2f} ms | {tokens_per_second:.0f} tok/s)")
+        #print0(f"step {step+1:4d}/{args.num_iterations} | train loss {lossf:.6f} | norm {norm:.4f} | lr {lr:.2e} | ({(t1-t0)*1000:.2f} ms | {tokens_per_second:.0f} tok/s)")
         writer.add_scalars('loss/train',{
             "train":lossf
             #'valacc':total_acc_val / len(val_data)
@@ -636,11 +651,11 @@ if __name__ == "__main__":
     # 在训练结束后
     if master_process:
         print("Running inference to validate the model:")
-        generated_text = inference(raw_model, [100])
+        generated_text = inference(raw_model, [130])
         print(f"Generated: {generated_text}")        
-        generated_text = inference(raw_model, [101])
+        generated_text = inference(raw_model, [130])
         print(f"Generated: {generated_text}")        
-        generated_text = inference(raw_model, [102])
+        generated_text = inference(raw_model, [130])
         print(f"Generated: {generated_text}")        
         save_checkpoint(raw_model,optimizer,f'simp.pt')
 
